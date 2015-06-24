@@ -1,0 +1,332 @@
+#!/usr/bin/env python
+
+"""
+    usage:
+        find_concordant_assignments [options] reference.fa aln1.bam aln2.bam
+
+    where the options are:
+        -h,--help : print usage and quit
+        -d,--debug: print debug information
+        -c,--mincoverage: min. coverage of the read required for an alignmnt [90]
+        -i,--identity: min. identity of the read required for an alignment [95]
+        -t,--taxonfile: get the GI <-> Taxon mapping in this file [None]
+
+    By default, the GI <-> Taxon mapping is found using eutils. 
+"""
+
+from sys import argv, stderr, stdin, exit, stdout
+from getopt import getopt, GetoptError
+from math import log, exp
+from subprocess import check_output
+
+from fasta import *
+
+import pysam
+
+__author__ = "Aakrosh Ratan"
+__email__  = "ratan@bx.psu.edu"
+
+# do we want the debug information to be printed?
+debug_flag = False
+
+# globals 
+mincov = 90.0
+minidnt = 95.0
+
+# the reference sequence
+reference = {}
+
+# tid 2 name mapping for the reference sequences
+names = {}
+
+# the total length of the reference
+dblen = 0
+
+# taxonomy ids of the sequence in the reference
+taxid = {}
+taxNm = None
+
+class Features:
+    pass
+
+def PrintAlignment(aln, ftrs, indx):
+    '''Print alignment in BLAST tabular format.
+    
+    The expected fields are:
+        queryId,subjectId,percIdentity,alnLength,mismatchCount,gapOpenCount, 
+        queryStart,queryEnd,subjectStart,subjectEnd,eVal,bitScore
+    '''
+    output = []
+    output.append(aln.qname+"/"+indx)
+    output.append(names[aln.tid])
+    output.append(str(ftrs.identity))
+    output.append(str(ftrs.qalen))
+    output.append(str(ftrs.mmcount))
+    output.append(str(ftrs.gapopens))
+    output.append(str(ftrs.qstart))
+    output.append(str(ftrs.qend))
+    output.append(str(ftrs.rstart))
+    output.append(str(ftrs.rend))
+    output.append(str(ftrs.eval))
+    output.append(str(ftrs.bitscore))
+    output.append(taxid[names[aln.tid]])
+    print "\t".join(output)
+    
+def NextSequenceAlignments(bam1File, bam2File):
+    '''Return all alignments for the next pair.
+    '''
+    last1 = None
+    last2 = None
+
+    finish1 = False
+    finish2 = False
+
+    while True:
+        # get the alignments for the next read from the first file
+        aln1s = [last1] if last1 != None else []
+        while True:
+            try:
+                aln = bam1File.next()
+            except StopIteration:
+                finish1 = True
+                break
+
+            if last1 == None: 
+                last1 = aln
+            if aln.qname != last1.qname:
+                last1 = aln
+                break
+            else:
+                aln1s.append(aln)
+           
+        # get the alignments for the next read from the second file
+        aln2s = [last2] if last2 != None else []
+        while True:
+            try:
+                aln = bam2File.next()
+            except StopIteration:
+                finish2 = True
+                break
+
+            if last2 == None: 
+                last2 = aln
+            if aln.qname != last2.qname:
+                last2 = aln
+                break
+            else:
+                aln2s.append(aln)
+        
+        yield aln1s,aln2s        
+
+        if finish1 or finish2:
+            assert finish1 == finish2
+            raise StopIteration
+
+def CalculateAlnLength(cigar):
+    '''Return the length of the aligned query sequence using the CIGAR string.
+    '''
+    matches = 0
+
+    for op,oplen in cigar:
+        if op in [0,1,7,8]:
+            matches += oplen
+
+    return matches
+
+def CalculatePid(aln, qseq):
+    '''Return the % identity of this alignment.
+    '''
+    ops = aln.cigar
+    
+    refindx = aln.pos
+    qryindx = 0
+    match = 0
+    mismatch = 0
+    gapopens = 0
+    qstart = -1
+    qend = -1
+
+    for op,length in ops:
+        if op == 0 or op == 7 or op == 8:
+            if qstart == -1: qstart = qryindx + 1
+            for i in range(0, length):
+                r = reference[names[aln.tid]][refindx].upper()
+                q = qseq[qryindx].upper()
+                if (r not in ["A","C","G","T"]) or \
+                   (q not in ["A","C","G","T"]) or \
+                   (r == q):
+                    match += 1
+                else:
+                    mismatch += 1
+                refindx += 1
+                qryindx += 1
+                qend = qryindx
+        elif op == 1:
+            gapopens += 1
+            qryindx += length
+            qend += length
+        elif op == 2:
+            gapopens += 1
+            refindx += length
+        elif op == 3:
+            refindx += length
+            print >> stderr, "Untested option: CIGAR : BAM_CREF_SKIP"
+        elif op == 4:
+            qryindx += length
+        elif op == 5:
+            qryindx += length
+        elif op == 6:
+            print >> stderr, "Untested option: CIGAR : BAM_CPAD"
+            pass
+
+    return qstart,qend,mismatch,gapopens,round(match * 100.0 / (match + mismatch),2)
+
+def QualifiedAlignments(alns):
+    '''Return the next alignment that passes our thresholds.
+    '''
+    for aln in alns:
+        if aln.is_unmapped: continue
+        if aln.is_qcfail: continue
+        if aln.is_duplicate: continue
+
+        ftrs = Features()
+
+        query_alignment_length = CalculateAlnLength(aln.cigar)
+        if aln.is_secondary:
+            if aln.is_reverse == alns[0].is_reverse:
+                qseq = alns[0].seq
+            else:
+                qseq = fastasequence.reverse_complement(alns[0].seq)
+        else:
+            qseq = aln.seq
+
+        coverage = query_alignment_length * 100.0 / alns[0].query_length
+        qstart,qend,mmcount,gapopens,identity = CalculatePid(aln, qseq)
+        if debug_flag:
+            print >> stderr, aln.qname, aln.cigar
+            print >> stderr, "\t",query_alignment_length, alns[0].query_length
+            print >> stderr, "\t",qstart,qend,mmcount,gapopens,identity
+
+        for x,y in aln.tags:
+            if x == 'AS':
+                score = y
+        
+        ftrs.identity = identity    
+        ftrs.qalen = query_alignment_length 
+        ftrs.mmcount = mmcount
+        ftrs.gapopens = gapopens
+        ftrs.qstart = qstart
+        ftrs.qend = qend
+        ftrs.rstart = aln.pos + 1
+        ftrs.rend = aln.aend
+        l = 0.625 # selected these values from blastn page for now.
+        k = 0.41
+        bitscore = round(((l*float(score))-log(k))/log(2),2)
+        ftrs.bitscore = bitscore
+        pval = k*exp(-l*score)
+        ftrs.eval = pval * alns[0].query_length * dblen
+
+        if coverage >= mincov and identity >= minidnt:
+            yield aln,ftrs
+
+def MaxOuterDistance(aln1, aln2):
+    '''Return the maximum outer distance between the two alignments.
+    '''
+    assert aln1.tid == aln2.tid
+    a1,b1 = aln1.pos,aln1.aend
+    a2,b2 = aln2.pos,aln2.aend
+    assert a1 < b1
+    assert a2 < b2
+    if a1 <= a2:
+        assert b2-a1 > 0
+        return b2-a1
+    else:
+        assert b1-a2 > 0
+        return b1-a2
+
+def GetTaxId(idnt):
+    '''Get the taxonomic id for this reference sequence.
+    '''
+    gi = idnt.split("|")[1]
+    cmd = "curl -s \"http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=%s&rettype=fasta&retmode=xml\" | grep \"TSeq_taxid\" | cut -d '>' -f 2 | cut -d '<' -f 1" % gi
+    return check_output(cmd, shell = True)
+
+def main(refName, aln1Name, aln2Name):
+    global dblen
+
+    records   = fasta(refName)
+
+    for i,r in enumerate(records):
+        s = r.fastasequence
+        idnt = s.name.split()[0]
+        reference[idnt] = s.seq
+        names[i] = idnt
+        dblen += len(s.seq)
+        if taxNm == None: taxid[idnt] = GetTaxId(idnt).strip()
+    records.close()
+    print >> stderr, "Read the reference sequence"
+    
+    # read the taxids from the optional file, if the user specified one
+    if taxNm != None:
+        file = open(taxNm, "r")
+        for line in file:
+            idnt,tax = line.strip().split()
+            taxid[idnt] = tax
+        file.close() 
+
+    bam1File = pysam.Samfile(aln1Name, "rb")
+    bam2File = pysam.Samfile(aln2Name, "rb")
+
+    for aln1s,aln2s in NextSequenceAlignments(bam1File, bam2File):
+        assert aln1s[0].qname == aln2s[0].qname
+        qaln1 = []
+        qaln2 = []
+        laln1s = list(QualifiedAlignments(aln1s))
+        laln2s = list(QualifiedAlignments(aln2s))
+
+        for aln1,ftrs1 in laln1s:
+            for aln2,ftrs2 in laln2s:
+                if (aln1.tid == aln2.tid):
+                    qaln1.append((aln1,ftrs1))
+                    qaln2.append((aln2,ftrs2))
+
+        for aln,ftrs in qaln1:
+            PrintAlignment(aln, ftrs, "1")
+        for aln,ftrs in qaln2:
+            PrintAlignment(aln, ftrs, "2")
+    
+    bam1File.close()
+    bam2File.close()
+
+if __name__ == "__main__":
+    try:
+        opts, args = getopt(argv[1:], "hdc:i:t:",["help", "debug", "mincoverage=", "minidentity=", "taxonfile="])
+    except GetoptError, err:
+        print str(err)
+        print >> stderr, __doc__
+        exit(2) 
+
+    for o, a in opts:
+        if o in ("-h", "--help"):
+            print >> stderr, __doc__
+            exit()
+        elif o in ("-d", "--debug"):
+            debug_flag = True
+        elif o in ("-c", "--mincoverage"):
+            mincov = float(a)
+        elif o in ("-i", "--minidentity"):
+            minidnt = float(a)
+        elif o in ("-x", "--mininsert"):
+            mininsert = int(a)
+        elif o in ("-y", "--maxinsert"):
+            maxinsert = int(a)
+        elif o in ("-t", "--taxonfile"):
+            taxNm = a
+        else:
+            assert False, "unhandled option"
+
+    if len(args) != 3:
+        print >> stderr, __doc__
+        exit(3)
+
+    main(args[0], args[1], args[2])
