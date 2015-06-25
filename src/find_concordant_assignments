@@ -46,6 +46,24 @@ dblen = 0
 taxid = {}
 taxNm = None
 
+class Alignment:
+    def __init__(self, aln):
+        self.qname = aln.qname
+        self.tid   = aln.tid
+        self.cigar = aln.cigar
+        self.pos   = aln.pos
+        self.is_unmapped = aln.is_unmapped
+        self.is_qcfail = aln.is_qcfail
+        self.is_duplicate = aln.is_duplicate
+        self.is_secondary = aln.is_secondary
+        self.is_reverse = aln.is_reverse
+        self.seq = aln.seq
+        self.tags = []
+        for x,y in aln.tags:
+            self.tags.append((x,y))
+        self.aend = aln.aend
+        self.query_length = aln.query_length
+
 class Features:
     pass
 
@@ -73,8 +91,6 @@ def PrintAlignment(aln, ftrs, indx):
     print "\t".join(output)
     
 def NextSequenceAlignments(bam1File, bam2File):
-    '''Return all alignments for the next pair.
-    '''
     last1 = None
     last2 = None
 
@@ -86,7 +102,7 @@ def NextSequenceAlignments(bam1File, bam2File):
         aln1s = [last1] if last1 != None else []
         while True:
             try:
-                aln = bam1File.next()
+                aln = Alignment(bam1File.next())
             except StopIteration:
                 finish1 = True
                 break
@@ -103,7 +119,7 @@ def NextSequenceAlignments(bam1File, bam2File):
         aln2s = [last2] if last2 != None else []
         while True:
             try:
-                aln = bam2File.next()
+                aln = Alignment(bam2File.next())
             except StopIteration:
                 finish2 = True
                 break
