@@ -7,11 +7,17 @@
     where the options are:
         -h,--help : print usage and quit
         -d,--debug: print debug information
-        -c,--mincoverage: min. coverage of the read required for an alignmnt [90]
-        -i,--identity: min. identity of the read required for an alignment [95]
-        -t,--taxonfile: get the GI <-> Taxon mapping in this file [None]
-
-    By default, the GI <-> Taxon mapping is found using eutils. 
+        -c,--minCoverage: min. coverage of read required for an alignmnt [90]
+        -i,--minIdentity: min. identity of read required for an alignment [95]
+        -t,--taxonFile: get the GI <-> Taxon mapping in this file [None]
+        -u,--updateTaxonFile: update the taxonFile is an entry is missing [False]    
+    By default, the GI <-> Taxon mapping is found using eutils. If you provide 
+    a taxonFile, then it is used. If an entry in the taxon file is missing, then
+    the tool tries to update it, if the argument -u is used in conjuction with
+    the -t argument. I strongly recommend using a taxon file or one should
+    expect an overhead. At some point I can write a separate tool to do this
+    once, or request the user to download the taxonomy tree from the NCBI
+    website and parse it (similar to what MEGAN does).
 """
 
 from sys import argv, stderr, stdin, exit, stdout
@@ -45,6 +51,9 @@ dblen = 0
 # taxonomy ids of the sequence in the reference
 taxid = {}
 taxNm = None
+
+# do I need to update the taxon file
+update = False
 
 class Alignment:
     def __init__(self, aln):
@@ -260,28 +269,21 @@ def MaxOuterDistance(aln1, aln2):
         assert b1-a2 > 0
         return b1-a2
 
-def GetTaxId(idnt):
+def GetTaxId(idnt, outfile):
     '''Get the taxonomic id for this reference sequence.
     '''
     gi = idnt.split("|")[1]
     cmd = "curl -s \"http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=%s&rettype=fasta&retmode=xml\" | grep \"TSeq_taxid\" | cut -d '>' -f 2 | cut -d '<' -f 1" % gi
-    return check_output(cmd, shell = True)
+    out = check_output(cmd, shell = True)
+    if outfile != None:
+        print >> outfile, "%s %s" % (idnt, out.strip())
+    return out
 
 def main(refName, aln1Name, aln2Name):
+    global taxNm
+    global taxid
     global dblen
 
-    records   = fasta(refName)
-
-    for i,r in enumerate(records):
-        s = r.fastasequence
-        idnt = s.name.split()[0]
-        reference[idnt] = s.seq
-        names[i] = idnt
-        dblen += len(s.seq)
-        if taxNm == None: taxid[idnt] = GetTaxId(idnt).strip()
-    records.close()
-    print >> stderr, "Read the reference sequence"
-    
     # read the taxids from the optional file, if the user specified one
     if taxNm != None:
         file = open(taxNm, "r")
@@ -290,6 +292,22 @@ def main(refName, aln1Name, aln2Name):
             taxid[idnt] = tax
         file.close() 
 
+    records   = fasta(refName)
+    file = None
+    if update == True:
+        file = open(taxNm, "a")
+
+    for i,r in enumerate(records):
+        s = r.fastasequence
+        idnt = s.name.split()[0]
+        reference[idnt] = s.seq
+        names[i] = idnt
+        dblen += len(s.seq)
+        if idnt not in taxid: 
+            taxid[idnt] = GetTaxId(idnt, file).strip()
+    records.close()
+    print >> stderr, "Read the reference sequence"
+    
     bam1File = pysam.Samfile(aln1Name, "rb")
     bam2File = pysam.Samfile(aln2Name, "rb")
 
@@ -316,7 +334,7 @@ def main(refName, aln1Name, aln2Name):
 
 if __name__ == "__main__":
     try:
-        opts, args = getopt(argv[1:], "hdc:i:t:",["help", "debug", "mincoverage=", "minidentity=", "taxonfile="])
+        opts, args = getopt(argv[1:], "hdc:i:t:u",["help", "debug", "minCoverage=", "minIdentity=", "taxonFile=", "updateTaxonFile"])
     except GetoptError, err:
         print str(err)
         print >> stderr, __doc__
@@ -328,21 +346,23 @@ if __name__ == "__main__":
             exit()
         elif o in ("-d", "--debug"):
             debug_flag = True
-        elif o in ("-c", "--mincoverage"):
+        elif o in ("-c", "--minCoverage"):
             mincov = float(a)
-        elif o in ("-i", "--minidentity"):
+        elif o in ("-i", "--minIdentity"):
             minidnt = float(a)
-        elif o in ("-x", "--mininsert"):
-            mininsert = int(a)
-        elif o in ("-y", "--maxinsert"):
-            maxinsert = int(a)
-        elif o in ("-t", "--taxonfile"):
+        elif o in ("-t", "--taxonFile"):
             taxNm = a
+        elif o in ("-u", "--updateTaxonFile"):
+            update = True
         else:
             assert False, "unhandled option"
 
     if len(args) != 3:
         print >> stderr, __doc__
         exit(3)
+
+    if update == True and taxNm == None:
+        print >> stderr, "Please use the argument -t to provide the name of a taxon file" 
+        exit(4)
 
     main(args[0], args[1], args[2])
