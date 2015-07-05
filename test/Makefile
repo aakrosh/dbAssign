@@ -1,3 +1,5 @@
+SHELL := /bin/bash 
+
 # Point this to the directory which has BWA
 B = /Users/ratan/third-party/bwa-0.7.10
 # Point this to the directory which has WGSIM
@@ -10,7 +12,7 @@ Y = /Users/ratan/third-party/broadinstitute-picard-64637e8/dist/picard.jar
 C = ../src
 R = reference.fa
 
-all: simulate align run
+all: simulate run
 
 simulate: 
 	$S/samtools faidx $R
@@ -18,14 +20,9 @@ simulate:
 	$P/wgsim -d 500 -s 30 -1 100 -2 100 -N 24000 reference.fa Illumina_100_500_1.fq Illumina_100_500_2.fq
 	$B/bwa index -a bwtsw $R 
 
-align:
-	$B/bwa mem -t 4 -R '@RG\tID:foo\tSM:bar' -a $R Illumina_100_500_1.fq \
-	| $S/samtools view -bST $R - > aln1.bam
-	$B/bwa mem -t 4 -R '@RG\tID:foo\tSM:bar' -a $R Illumina_100_500_2.fq \
-	| $S/samtools view -bST $R - > aln2.bam
-
 run:
-	./../src/find_concordant_assignments reference.fa aln1.bam aln2.bam  > blast.out
+	./../src/find_concordant_assignments reference.fa <($B/bwa mem -t 4 -R '@RG\tID:foo\tSM:bar' -a $R Illumina_100_500_1.fq | $S/samtools view -bST $R -) <($B/bwa mem -t 4 -R '@RG\tID:foo\tSM:bar' -a $R Illumina_100_500_2.fq | $S/samtools view -bST $R -)  > blast.out
 
 clean:
 	ls -1 | grep -v "Makefile\|reference.fa" | xargs rm
+	rm reference.fa.*
