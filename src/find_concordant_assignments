@@ -10,7 +10,10 @@
         -c,--minCoverage: min. coverage of read required for an alignmnt [90]
         -i,--minIdentity: min. identity of read required for an alignment [95]
         -t,--taxonFile: get the GI <-> Taxon mapping in this file [None]
-        -u,--updateTaxonFile: update the taxonFile is an entry is missing [False]    
+        -u,--updateTaxonFile: update the taxonFile is an entry is missing [False]
+        -p,--numProcesses: run this in parallel as these many processes [1]
+        -s,--chunkSize: each process should process these many reads [100000]
+    
     By default, the GI <-> Taxon mapping is found using eutils. If you provide 
     a taxonFile, then it is used. If an entry in the taxon file is missing, then
     the tool tries to update it, if the argument -u is used in conjuction with
@@ -24,6 +27,7 @@ from sys import argv, stderr, stdin, exit, stdout
 from getopt import getopt, GetoptError
 from math import log, exp
 from subprocess import check_output
+from multiprocessing import Pool, Manager
 
 from fasta import *
 
@@ -38,6 +42,8 @@ debug_flag = False
 # globals 
 mincov = 90.0
 minidnt = 95.0
+numprocesses = 1
+chunksize = 100000
 
 # the reference sequence
 reference = {}
@@ -279,6 +285,39 @@ def GetTaxId(idnt, outfile):
         print >> outfile, "%s %s" % (idnt, out.strip())
     return out
 
+def ProcessPair(alns):
+    aln1s,aln2s = alns
+    assert aln1s[0].qname == aln2s[0].qname
+    qaln1 = []
+    qaln2 = []
+    laln1s = list(QualifiedAlignments(aln1s))
+    laln2s = list(QualifiedAlignments(aln2s))
+
+    for aln1,ftrs1 in laln1s:
+        for aln2,ftrs2 in laln2s:
+            if (aln1.tid == aln2.tid):
+                qaln1.append((aln1,ftrs1))
+                qaln2.append((aln2,ftrs2))
+
+    return qaln1,qaln2
+
+def Chunker(bam1File, bam2File, chunksize):
+    chunk = []
+    numread = 0
+
+    for aln1s,aln2s in NextSequenceAlignments(bam1File, bam2File):
+        chunk.append((aln1s,aln2s))
+        numread += 1
+        if numread == chunksize:
+            yield chunk
+            chunk = []
+            numread = 0
+
+    if numread > 0:
+        yield chunk
+
+    raise StopIteration       
+
 def main(refName, aln1Name, aln2Name):
     global taxNm
     global taxid
@@ -310,31 +349,23 @@ def main(refName, aln1Name, aln2Name):
     
     bam1File = pysam.Samfile(aln1Name, "rb")
     bam2File = pysam.Samfile(aln2Name, "rb")
+    pool = Pool(numprocesses)
 
-    for aln1s,aln2s in NextSequenceAlignments(bam1File, bam2File):
-        assert aln1s[0].qname == aln2s[0].qname
-        qaln1 = []
-        qaln2 = []
-        laln1s = list(QualifiedAlignments(aln1s))
-        laln2s = list(QualifiedAlignments(aln2s))
+    for chunk in Chunker(bam1File, bam2File, chunksize):
+        result = pool.map(ProcessPair,chunk)
+        for qaln1,qaln2 in result:
+            if len(qaln1) > 0 or len(qaln2) > 0:
+                for aln,ftrs in qaln1:
+                    PrintAlignment(aln, ftrs, "1")
+                for aln,ftrs in qaln2:
+                    PrintAlignment(aln, ftrs, "2")
 
-        for aln1,ftrs1 in laln1s:
-            for aln2,ftrs2 in laln2s:
-                if (aln1.tid == aln2.tid):
-                    qaln1.append((aln1,ftrs1))
-                    qaln2.append((aln2,ftrs2))
-
-        for aln,ftrs in qaln1:
-            PrintAlignment(aln, ftrs, "1")
-        for aln,ftrs in qaln2:
-            PrintAlignment(aln, ftrs, "2")
-    
     bam1File.close()
     bam2File.close()
 
 if __name__ == "__main__":
     try:
-        opts, args = getopt(argv[1:], "hdc:i:t:u",["help", "debug", "minCoverage=", "minIdentity=", "taxonFile=", "updateTaxonFile"])
+        opts, args = getopt(argv[1:], "hdc:i:t:up:s:",["help", "debug", "minCoverage=", "minIdentity=", "taxonFile=", "updateTaxonFile", "numProcesses=", "chunkSize="])
     except GetoptError, err:
         print str(err)
         print >> stderr, __doc__
@@ -354,6 +385,10 @@ if __name__ == "__main__":
             taxNm = a
         elif o in ("-u", "--updateTaxonFile"):
             update = True
+        elif o in ("-p", "--numProcesses"):
+            numprocesses = int(a)
+        elif o in ("-s", "--chunkSize"):
+            chunksize = int(a)
         else:
             assert False, "unhandled option"
 

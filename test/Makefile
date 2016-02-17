@@ -18,7 +18,11 @@ simulate:
 	$B/bwa index -a bwtsw $R 
 
 run:
-	./../src/find_concordant_assignments -t taxids.txt -u reference.fa <($B/bwa mem -t 4 -R '@RG\tID:foo\tSM:bar' -a $R Illumina_100_500_1.fq | $S/samtools view -bST $R -) <($B/bwa mem -t 4 -R '@RG\tID:foo\tSM:bar' -a $R Illumina_100_500_2.fq | $S/samtools view -bST $R -)  > blast.out
+	$B/bwa mem -t 4 -R '@RG\tID:foo\tSM:bar' -a $R Illumina_100_500_1.fq \
+	| $S/samtools view -bST $R - > aln1.bam
+	$B/bwa mem -t 4 -R '@RG\tID:foo\tSM:bar' -a $R Illumina_100_500_2.fq \
+	| $S/samtools view -bST $R - > aln2.bam
+	time ./../src/find_concordant_assignments -p 10 -s 100 -t taxids.txt -u reference.fa aln1.bam aln2.bam  > blast.out
 
 clean:
 	ls -1 | grep -v "Makefile\|reference.fa\|taxids.txt" | xargs rm
