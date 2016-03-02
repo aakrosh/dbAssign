@@ -1,0 +1,79 @@
+#!/usr/bin/env python
+
+"""
+    usage:
+        update_taxid_db [options] db.fa.fai
+
+    where the options are:
+        -h,--help : print usage and quit
+        -d,--debug: print debug information
+    
+    This program updates the GI <-> Taxon mapping found using eutils. db.fai 
+    represents a fasta index file of the database that will be used with 
+    find_concordant_assignments script. One can create the *.fai file using the 
+    following command:
+
+    samtools faidx db.fa
+
+    Alternatively, find_concordant_assignments can be used with "-u" in
+    conjuction with the -t argument. If an entry in the taxon file is missing, 
+    then the tool tries to update it. 
+    
+    I strongly recommend running this script to create an updated taxon mapping
+    to avoid overhead when using find_concordant_assignments
+"""
+
+from sys import argv, stderr, stdin, exit, stdout
+from getopt import getopt, GetoptError
+from subprocess import check_output
+
+__author__ = "Aakrosh Ratan"
+__email__  = "ratan@bx.psu.edu"
+
+# do we want the debug information to be printed?
+debug_flag = False
+
+def GetTaxId(gi):
+    '''Get the taxonomic id for this reference sequence.
+    '''
+    cmd = "curl -s \"http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=%s&rettype=fasta&retmode=xml\" | grep \"TSeq_taxid\" | cut -d '>' -f 2 | cut -d '<' -f 1" % gi
+    out = check_output(cmd, shell = True)
+    return out.strip()
+
+def main(dbName):
+    file = open(dbName, "r")
+
+    for line in file:
+        idnt = line.strip().split()[0]
+        try:
+            gi = idnt.split("|")[1]
+        except IndexError:
+            # looks like the db has accession numbers instead of GI
+            gi = idnt.strip()
+        taxon = GetTaxId(idnt)
+        print idnt,taxon
+
+    file.close()
+
+if __name__ == "__main__":
+    try:
+        opts, args = getopt(argv[1:], "hd",["help", "debug"])
+    except GetoptError, err:
+        print str(err)
+        print >> stderr, __doc__
+        exit(2) 
+
+    for o, a in opts:
+        if o in ("-h", "--help"):
+            print >> stderr, __doc__
+            exit()
+        elif o in ("-d", "--debug"):
+            debug_flag = True
+        else:
+            assert False, "unhandled option"
+
+    if len(args) != 1:
+        print >> stderr, __doc__
+        exit(3)
+
+    main(args[0])

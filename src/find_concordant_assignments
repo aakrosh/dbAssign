@@ -17,10 +17,8 @@
     By default, the GI <-> Taxon mapping is found using eutils. If you provide 
     a taxonFile, then it is used. If an entry in the taxon file is missing, then
     the tool tries to update it, if the argument -u is used in conjuction with
-    the -t argument. I strongly recommend using a taxon file or one should
-    expect an overhead. At some point I can write a separate tool to do this
-    once, or request the user to download the taxonomy tree from the NCBI
-    website and parse it (similar to what MEGAN does).
+    the -t argument. I strongly recommend using a taxon file which can easily be
+    generated using update_taxid_db included with this project.
 """
 
 from sys import argv, stderr, stdin, exit, stdout
@@ -278,7 +276,12 @@ def MaxOuterDistance(aln1, aln2):
 def GetTaxId(idnt, outfile):
     '''Get the taxonomic id for this reference sequence.
     '''
-    gi = idnt.split("|")[1]
+    try:
+        gi = idnt.split("|")[1] 
+    except IndexError:
+        # looks like the db has accession numbers instead of GI
+        gi = idnt.strip()
+    
     cmd = "curl -s \"http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=nuccore&id=%s&rettype=fasta&retmode=xml\" | grep \"TSeq_taxid\" | cut -d '>' -f 2 | cut -d '<' -f 1" % gi
     out = check_output(cmd, shell = True)
     if outfile != None:
