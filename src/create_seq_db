@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+
+"""
+    usage:
+        create_seq_db [options] output.db reference.fa taxids.txt
+
+    where the options are:
+        -h,--help : print usage and quit
+        -d,--debug: print debug information
+    
+    A sqlite3 database is created for the fasta file, which has sequences for
+    several species. taxids.txt has the GI -> Taxon mapping for all the
+    sequences in the reference.fa fasta file. This only needs to be rerun when 
+    the database changes.
+"""
+
+from sys import argv, stderr, stdin, exit, stdout
+from getopt import getopt, GetoptError
+from time import time
+
+import sqlite3
+
+from fasta import *
+
+__author__ = "Aakrosh Ratan"
+__email__  = "ratan@virginia.edu"
+
+# do we want the debug information to be printed?
+debug_flag = False
+progress = 10
+
+def keys(db):
+    cursor = db.cursor()
+    return cursor.execute("""SELECT k FROM refseq""").fetchall()
+
+def get(key, db, default=None):
+    cursor = db.cursor()
+    result = cursor.execute("""SELECT v FROM refseq WHERE k = ?""", (key,)).fetchone()
+    if result is None:
+        return default
+    return result[0]
+
+def save(key, value, db):
+    cursor = db.cursor()
+    cursor.execute("""INSERT INTO refseq VALUES (?,?)""", (key, value))
+    db.commit()
+
+def main(outName, refName, taxidName):
+    records   = fasta(refName)
+    con = sqlite3.connect(outName)    
+
+    # create the taxid table, dropping it if it already exists
+    con.execute('''DROP TABLE IF EXISTS taxids''')
+    con.execute('''CREATE TABLE taxids (k text, v text)''')
+    taxids = []
+    with open(taxidName, 'r') as f:
+        for line in f:
+            key,val = line.strip().split()
+            taxids.append((key,val))
+            if debug_flag:
+                print >> stderr, "Added %s to taxid database" %  (key)
+    con.executemany("insert into taxids(k, v) values (?, ?)", taxids)
+    print >> stderr, "Read the taxonomy ids."
+    con.commit()
+
+    ## create the table, dropping the table if it already exists
+    con.execute('''DROP TABLE IF EXISTS refseq''')
+    con.execute('''CREATE TABLE refseq (k text, v text)''')
+
+    start_time = time()
+    for i,r in enumerate(records):
+        s = r.fastasequence
+        idnt = s.name.split()[0]
+        save(idnt, s.seq, con)
+        if debug_flag:
+            print >> stderr, "Added %s to refseq database" % idnt
+        if i % progress == 0:
+            elapsed_time = time() - start_time
+            print >> stderr, "Added %d sequence(s) to refseq. %d sec. elapsed" \
+                   % (i+1, elapsed_time)
+            
+    records.close()
+    print >> stderr, "Read the reference sequence."
+    con.commit()
+
+    con.close()
+
+if __name__ == "__main__":
+    try:
+        opts, args = getopt(argv[1:], "hd",["help", "debug"])
+    except GetoptError, err:
+        print str(err)
+        print >> stderr, __doc__
+        exit(2) 
+
+    for o, a in opts:
+        if o in ("-h", "--help"):
+            print >> stderr, __doc__
+            exit()
+        elif o in ("-d", "--debug"):
+            debug_flag = True
+        else:
+            assert False, "unhandled option"
+
+    if len(args) != 3:
+        print >> stderr, __doc__
+        exit(3)
+
+    main(args[0], args[1], args[2])

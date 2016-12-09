@@ -2,23 +2,19 @@
 
 """
     usage:
-        find_concordant_assignments [options] reference.fa aln1.bam aln2.bam
+        find_concordant_assignments [options] reference.db aln1.bam aln2.bam
 
     where the options are:
         -h,--help : print usage and quit
         -d,--debug: print debug information
         -c,--minCoverage: min. coverage of read required for an alignmnt [90]
         -i,--minIdentity: min. identity of read required for an alignment [95]
-        -t,--taxonFile: get the GI <-> Taxon mapping in this file [None]
-        -u,--updateTaxonFile: update the taxonFile is an entry is missing [False]
         -p,--numProcesses: run this in parallel as these many processes [1]
         -s,--chunkSize: each process should process these many reads [100000]
     
-    By default, the GI <-> Taxon mapping is found using eutils. If you provide 
-    a taxonFile, then it is used. If an entry in the taxon file is missing, then
-    the tool tries to update it, if the argument -u is used in conjuction with
-    the -t argument. I strongly recommend using a taxon file which can easily be
-    generated using update_taxid_db included with this project.
+    The GI <-> Taxon mapping and the sequence of the species are expected in 
+    the sqlite3 database referenced by reference.db. Please use create_seq_db
+    to create the database before running this script.
 """
 
 from sys import argv, stderr, stdin, exit, stdout
@@ -29,6 +25,7 @@ from multiprocessing import Pool, Manager
 
 from fasta import *
 
+import sqlite3
 import pysam
 
 __author__ = "Aakrosh Ratan"
@@ -321,35 +318,29 @@ def Chunker(bam1File, bam2File, chunksize):
 
     raise StopIteration       
 
-def main(refName, aln1Name, aln2Name):
+def main(dbName, aln1Name, aln2Name):
     global taxNm
     global taxid
     global dblen
 
-    # read the taxids from the optional file, if the user specified one
-    if taxNm != None:
-        file = open(taxNm, "r")
-        for line in file:
-            idnt,tax = line.strip().split()
-            taxid[idnt] = tax
-        file.close() 
+    # read the taxids from the database and store them in the hash. This should
+    # be cheaper than repeated connections to the database.
+    con = sqlite3.connect(dbName)
+    con.text_factory = sqlite3.OptimizedUnicode
+    for row in con.execute("select k, v from taxids"):
+        k,v = row
+        taxid[k] = v
+    print >> stderr, "Read the taxonomy ids."
 
-    records   = fasta(refName)
-    file = None
-    if update == True:
-        file = open(taxNm, "a")
+    # now go through the database and store the sequences in a hash. This should 
+    # be cheaper than repeated connections to the database.
+    for row in con.execute("select k, v from refseq"):
+        k,v = row
+        reference[k] = v
+        dblen += len(v)
+    con.close()
+    print >> stderr, "Read the reference sequence."
 
-    for i,r in enumerate(records):
-        s = r.fastasequence
-        idnt = s.name.split()[0]
-        reference[idnt] = s.seq
-        names[i] = idnt
-        dblen += len(s.seq)
-        if idnt not in taxid: 
-            taxid[idnt] = GetTaxId(idnt, file).strip()
-    records.close()
-    print >> stderr, "Read the reference sequence"
-    
     bam1File = pysam.Samfile(aln1Name, "rb")
     bam2File = pysam.Samfile(aln2Name, "rb")
     pool = Pool(numprocesses)
@@ -368,7 +359,7 @@ def main(refName, aln1Name, aln2Name):
 
 if __name__ == "__main__":
     try:
-        opts, args = getopt(argv[1:], "hdc:i:t:up:s:",["help", "debug", "minCoverage=", "minIdentity=", "taxonFile=", "updateTaxonFile", "numProcesses=", "chunkSize="])
+        opts, args = getopt(argv[1:], "hdc:i:p:s:",["help", "debug", "minCoverage=", "minIdentity=", "numProcesses=", "chunkSize="])
     except GetoptError, err:
         print str(err)
         print >> stderr, __doc__
@@ -384,10 +375,6 @@ if __name__ == "__main__":
             mincov = float(a)
         elif o in ("-i", "--minIdentity"):
             minidnt = float(a)
-        elif o in ("-t", "--taxonFile"):
-            taxNm = a
-        elif o in ("-u", "--updateTaxonFile"):
-            update = True
         elif o in ("-p", "--numProcesses"):
             numprocesses = int(a)
         elif o in ("-s", "--chunkSize"):
@@ -398,9 +385,5 @@ if __name__ == "__main__":
     if len(args) != 3:
         print >> stderr, __doc__
         exit(3)
-
-    if update == True and taxNm == None:
-        print >> stderr, "Please use the argument -t to provide the name of a taxon file" 
-        exit(4)
 
     main(args[0], args[1], args[2])
